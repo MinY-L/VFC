@@ -2,3 +2,4 @@ build/
 CMakeLists.txt.user*
 .qtc_clangd/
 .qtcreator/
+selftest_result.txt

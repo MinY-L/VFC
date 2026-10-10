@@ -45,6 +45,13 @@ else()
     endif()
 endif()
 
+# 有 selftest.cpp 才编译自测；没有则主程序照常构建，正式运行不会进自测。
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/selftest.cpp")
+    target_sources(VFC PRIVATE selftest.cpp selftest.h)
+    target_compile_definitions(VFC PRIVATE VFC_HAS_SELFTEST)
+    message(STATUS "VFC self-test enabled; run with --selftest")
+endif()
+
 target_link_libraries(VFC PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
