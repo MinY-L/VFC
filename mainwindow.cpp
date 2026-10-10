@@ -21,6 +21,7 @@
 #include <QSizePolicy>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -156,7 +157,7 @@ MainWindow::~MainWindow()
     ++m_jobId;
     stopProcessForDestroy(m_probeProcess);
     stopProcessForDestroy(m_thumbProcess);
-    cleanupThumbFile();
+    cleanupThumbFile(false);
 }
 
 void MainWindow::setupUi()
@@ -184,16 +185,19 @@ void MainWindow::setupUi()
     top->addWidget(m_fileNameLabel, 1);
 
     m_thumbLabel = new QLabel(this);
-    m_thumbLabel->setMinimumSize(320, 180);
+    m_thumbLabel->setFixedSize(320, 180);
     m_thumbLabel->setAlignment(Qt::AlignCenter);
     m_thumbLabel->setFrameStyle(QFrame::StyledPanel | QFrame::Sunken);
     m_thumbLabel->setText(tr("缩略图"));
-    m_thumbLabel->setScaledContents(false);
-    m_thumbLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::MinimumExpanding);
+    m_thumbLabel->setScaledContents(false); // 不让 QLabel 再拉图像，缩放在 setPixmap 前做完
+    m_thumbLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 
     auto *infoBox = new QGroupBox(tr("媒体信息"), this);
+    infoBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
     auto *form = new QFormLayout(infoBox);
     form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     form->setHorizontalSpacing(16);
     form->setVerticalSpacing(10);
     form->setContentsMargins(12, 12, 12, 12);
@@ -222,10 +226,11 @@ void MainWindow::setupUi()
     auto *body = new QHBoxLayout();
     body->setSpacing(12);
     body->addWidget(m_thumbLabel, 0, Qt::AlignTop);
-    body->addWidget(infoBox, 1);
+    body->addWidget(infoBox, 1, Qt::AlignTop);
 
     root->addLayout(top);
-    root->addLayout(body, 1);
+    root->addLayout(body);
+    root->addStretch(1);
 
     statusBar()->showMessage(tr("请打开一个视频文件"));
     connect(m_openButton, &QPushButton::clicked, this, &MainWindow::onOpenVideo);
@@ -259,7 +264,18 @@ void MainWindow::onOpenVideo()
         return;
 
     m_lastDir = QFileInfo(path).absolutePath();
-    m_currentFile = path;
+    loadVideo(path);
+}
+
+void MainWindow::loadVideo(const QString &filePath)
+{
+    const QFileInfo info(filePath);
+    if (!info.exists() || !info.isFile()) {
+        showStatus(tr("文件不存在：%1").arg(QDir::toNativeSeparators(filePath)), true);
+        return;
+    }
+
+    m_currentFile = info.absoluteFilePath();
 
     // 使进行中的探测/抽帧回调全部失效，再异步杀掉旧进程，不阻塞界面
     ++m_jobId;
@@ -271,12 +287,18 @@ void MainWindow::onOpenVideo()
 
     abandonProcess(m_probeProcess);
     abandonProcess(m_thumbProcess);
-    cleanupThumbFile();
+    cleanupThumbFile(true);
     resetMediaInfo();
 
-    m_fileNameLabel->setText(QDir::toNativeSeparators(path));
+    m_fileNameLabel->setText(QDir::toNativeSeparators(m_currentFile));
     showStatus(tr("正在读取视频信息…"));
-    startProbe(path);
+    startProbe(m_currentFile);
+}
+
+bool MainWindow::isBusy() const
+{
+    return (m_probeProcess && m_probeProcess->state() != QProcess::NotRunning)
+        || (m_thumbProcess && m_thumbProcess->state() != QProcess::NotRunning);
 }
 
 void MainWindow::startProbe(const QString &filePath)
@@ -287,7 +309,8 @@ void MainWindow::startProbe(const QString &filePath)
     m_probeProcess = new QProcess(this);
     m_probeProcess->setProcessChannelMode(QProcess::SeparateChannels);
 
-    connect(m_probeProcess, &QProcess::errorOccurred, this,
+    QProcess *proc = m_probeProcess;
+    connect(proc, &QProcess::errorOccurred, this,
             [this, jobId](QProcess::ProcessError error) {
         if (jobId != m_jobId)
             return;
@@ -297,11 +320,11 @@ void MainWindow::startProbe(const QString &filePath)
         }
     });
 
-    connect(m_probeProcess, &QProcess::finished, this,
-            [this, jobId](int exitCode, QProcess::ExitStatus exitStatus) {
+    connect(proc, &QProcess::finished, this,
+            [this, jobId, proc](int exitCode, QProcess::ExitStatus exitStatus) {
         if (jobId != m_jobId)
             return;
-        onProbeFinished(exitCode, exitStatus);
+        onProbeFinished(proc, exitCode, exitStatus);
     });
 
     // 路径作为独立参数传入，中文、空格都由 QProcess 正确引用，禁止拼进一个命令字符串
@@ -316,11 +339,10 @@ void MainWindow::startProbe(const QString &filePath)
     updateBusyState();
 }
 
-void MainWindow::onProbeFinished(int exitCode, QProcess::ExitStatus exitStatus)
+void MainWindow::onProbeFinished(QProcess *process, int exitCode, QProcess::ExitStatus exitStatus)
 {
     updateBusyState();
-
-    if (m_probeProcess && m_probeProcess->error() == QProcess::FailedToStart)
+    if (!process || process->error() == QProcess::FailedToStart)
         return;
 
     if (exitStatus != QProcess::NormalExit || exitCode != 0) {
@@ -328,7 +350,7 @@ void MainWindow::onProbeFinished(int exitCode, QProcess::ExitStatus exitStatus)
         return;
     }
 
-    const QByteArray json = m_probeProcess->readAllStandardOutput();
+    const QByteArray json = process->readAllStandardOutput();
     if (json.trimmed().isEmpty()) {
         showStatus(tr("ffprobe 未返回任何信息"), true);
         return;
@@ -433,7 +455,8 @@ void MainWindow::startThumbnail(const QString &filePath, int seekSeconds)
     m_thumbProcess = new QProcess(this);
     m_thumbProcess->setProcessChannelMode(QProcess::SeparateChannels);
 
-    connect(m_thumbProcess, &QProcess::errorOccurred, this,
+    QProcess *proc = m_thumbProcess;
+    connect(proc, &QProcess::errorOccurred, this,
             [this, jobId](QProcess::ProcessError error) {
         if (jobId != m_jobId)
             return;
@@ -443,11 +466,11 @@ void MainWindow::startThumbnail(const QString &filePath, int seekSeconds)
         }
     });
 
-    connect(m_thumbProcess, &QProcess::finished, this,
-            [this, jobId](int exitCode, QProcess::ExitStatus exitStatus) {
+    connect(proc, &QProcess::finished, this,
+            [this, jobId, proc](int exitCode, QProcess::ExitStatus exitStatus) {
         if (jobId != m_jobId)
             return;
-        onThumbFinished(exitCode, exitStatus);
+        onThumbFinished(proc, exitCode, exitStatus);
     });
 
     QStringList args;
@@ -462,11 +485,10 @@ void MainWindow::startThumbnail(const QString &filePath, int seekSeconds)
     updateBusyState();
 }
 
-void MainWindow::onThumbFinished(int exitCode, QProcess::ExitStatus exitStatus)
+void MainWindow::onThumbFinished(QProcess *process, int exitCode, QProcess::ExitStatus exitStatus)
 {
     updateBusyState();
-
-    if (m_thumbProcess && m_thumbProcess->error() == QProcess::FailedToStart)
+    if (!process || process->error() == QProcess::FailedToStart)
         return;
 
     if (exitStatus != QProcess::NormalExit || exitCode != 0) {
@@ -489,18 +511,14 @@ void MainWindow::onThumbFinished(int exitCode, QProcess::ExitStatus exitStatus)
         return;
     }
 
-    m_thumbLabel->setText(QString());
-    m_thumbLabel->setPixmap(pixmap);
+    applyThumbnailPixmap(pixmap);
     m_thumbOk = true;
     showStatus(tr("已加载：%1").arg(QFileInfo(m_currentFile).fileName()));
 }
 
 void MainWindow::updateBusyState()
 {
-    const bool busy =
-        (m_probeProcess && m_probeProcess->state() != QProcess::NotRunning)
-        || (m_thumbProcess && m_thumbProcess->state() != QProcess::NotRunning);
-    setCursor(busy ? Qt::BusyCursor : Qt::ArrowCursor);
+    setCursor(isBusy() ? Qt::BusyCursor : Qt::ArrowCursor);
 }
 
 void MainWindow::showStatus(const QString &message, bool isError)
@@ -530,16 +548,45 @@ void MainWindow::stopProcessForDestroy(QProcess *process)
     }
 }
 
-void MainWindow::cleanupThumbFile()
+void MainWindow::cleanupThumbFile(bool delayed)
 {
     if (m_thumbPath.isEmpty())
         return;
-    QFile::remove(m_thumbPath);
+    const QString leftover = m_thumbPath;
     m_thumbPath.clear();
+    if (!delayed) {
+        QFile::remove(leftover);
+        return;
+    }
+    // 快速连开时旧 ffmpeg 可能还占着文件，稍后再删，避免阻塞 UI
+    QTimer::singleShot(2000, [leftover]() { QFile::remove(leftover); });
+}
+
+void MainWindow::applyThumbnailPixmap(const QPixmap &pixmap)
+{
+    const QSize box = m_thumbLabel->contentsRect().size();
+    if (box.isEmpty() || pixmap.isNull()) {
+        m_thumbLabel->setPixmap(QPixmap());
+        m_thumbLabel->setText(tr("缩略图"));
+        return;
+    }
+
+    const qreal dpr = m_thumbLabel->devicePixelRatioF();
+    QPixmap scaled = pixmap.scaled(box * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    scaled.setDevicePixelRatio(dpr);
+    m_thumbLabel->setText(QString());
+    m_thumbLabel->setPixmap(scaled);
 }
 
 QString MainWindow::resolveTool(const QString &name) const
 {
+    const bool wantProbe = name.startsWith(QLatin1String("ffprobe"), Qt::CaseInsensitive);
+    const bool wantMpeg = name.startsWith(QLatin1String("ffmpeg"), Qt::CaseInsensitive);
+    if (wantProbe && !m_cachedFfprobe.isEmpty())
+        return m_cachedFfprobe;
+    if (wantMpeg && !m_cachedFfmpeg.isEmpty())
+        return m_cachedFfmpeg;
+
 #ifdef Q_OS_WIN
     const QString exe = name.endsWith(QLatin1String(".exe"), Qt::CaseInsensitive)
                             ? name
@@ -570,6 +617,16 @@ QString MainWindow::resolveTool(const QString &name) const
         return {};
     };
 
+    auto remember = [&](const QString &hit) -> QString {
+        if (hit.isEmpty())
+            return {};
+        if (wantProbe)
+            m_cachedFfprobe = hit;
+        else if (wantMpeg)
+            m_cachedFfmpeg = hit;
+        return hit;
+    };
+
     const QString appDir = QCoreApplication::applicationDirPath();
     for (const QString &candidate : {
              QDir(appDir).filePath(exe),
@@ -578,34 +635,34 @@ QString MainWindow::resolveTool(const QString &name) const
          }) {
         const QString hit = absIfExists(candidate);
         if (!hit.isEmpty())
-            return hit;
+            return remember(hit);
     }
 
     // 当前进程 PATH（从终端或重启后的 Qt Creator 运行时能直接命中 winget 注入的目录）
     const QString fromEnv = searchPathList(qEnvironmentVariable("PATH"));
     if (!fromEnv.isEmpty())
-        return fromEnv;
+        return remember(fromEnv);
 
 #ifdef Q_OS_WIN
     // Qt Creator 若在 winget install 之前就已启动，进程 PATH 可能是旧的；改读注册表里的用户/系统 PATH
     const QSettings userEnv(QStringLiteral("HKEY_CURRENT_USER\\Environment"), QSettings::NativeFormat);
     const QString fromUserPath = searchPathList(userEnv.value(QStringLiteral("Path")).toString());
     if (!fromUserPath.isEmpty())
-        return fromUserPath;
+        return remember(fromUserPath);
 
     const QSettings machineEnv(
         QStringLiteral("HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment"),
         QSettings::NativeFormat);
     const QString fromMachinePath = searchPathList(machineEnv.value(QStringLiteral("Path")).toString());
     if (!fromMachinePath.isEmpty())
-        return fromMachinePath;
+        return remember(fromMachinePath);
 
     const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
     if (!localAppData.isEmpty()) {
         const QString fromLinks = absIfExists(
             QDir(localAppData).filePath(QStringLiteral("Microsoft/WinGet/Links/") + exe));
         if (!fromLinks.isEmpty())
-            return fromLinks;
+            return remember(fromLinks);
 
         const QDir packages(QDir(localAppData).filePath(QStringLiteral("Microsoft/WinGet/Packages")));
         const QStringList ffmpegPkgs = packages.entryList(
@@ -618,14 +675,14 @@ QString MainWindow::resolveTool(const QString &name) const
             for (const QString &build : builds) {
                 const QString hit = absIfExists(pkgDir.filePath(build + QStringLiteral("/bin/") + exe));
                 if (!hit.isEmpty())
-                    return hit;
+                    return remember(hit);
             }
             const QString inBin = absIfExists(pkgDir.filePath(QStringLiteral("bin/") + exe));
             if (!inBin.isEmpty())
-                return inBin;
+                return remember(inBin);
             const QString inRoot = absIfExists(pkgDir.filePath(exe));
             if (!inRoot.isEmpty())
-                return inRoot;
+                return remember(inRoot);
         }
     }
 #endif

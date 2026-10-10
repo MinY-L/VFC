@@ -6,6 +6,7 @@
 #include <QString>
 
 class QLabel;
+class QPixmap;
 class QPushButton;
 
 class MainWindow : public QMainWindow
@@ -16,6 +17,12 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
+    void loadVideo(const QString &filePath);
+    bool isBusy() const;
+    bool lastProbeOk() const { return m_probeOk; }
+    bool lastThumbOk() const { return m_thumbOk; }
+    QString currentFilePath() const { return m_currentFile; }
+
 private slots:
     void onOpenVideo();
 
@@ -24,14 +31,15 @@ private:
     void resetMediaInfo();
     void startProbe(const QString &filePath);
     void startThumbnail(const QString &filePath, int seekSeconds);
-    void onProbeFinished(int exitCode, QProcess::ExitStatus exitStatus);
-    void onThumbFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void onProbeFinished(QProcess *process, int exitCode, QProcess::ExitStatus exitStatus);
+    void onThumbFinished(QProcess *process, int exitCode, QProcess::ExitStatus exitStatus);
     void parseProbeJson(const QByteArray &jsonData);
     void updateBusyState();
     void showStatus(const QString &message, bool isError = false);
     void abandonProcess(QProcess *&process);
     void stopProcessForDestroy(QProcess *process);
-    void cleanupThumbFile();
+    void cleanupThumbFile(bool delayed = true);
+    void applyThumbnailPixmap(const QPixmap &pixmap);
     QString resolveTool(const QString &name) const;
 
     QPushButton *m_openButton = nullptr;
@@ -58,6 +66,9 @@ private:
     bool m_thumbRetryUsed = false;
     bool m_probeOk = false;
     bool m_thumbOk = false;
+
+    mutable QString m_cachedFfprobe;
+    mutable QString m_cachedFfmpeg;
 };
 
 #endif // MAINWINDOW_H
