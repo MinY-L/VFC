@@ -15,8 +15,10 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QComboBox>
+#include <QDesktopServices>
 #include <QLabel>
 #include <QLineEdit>
+#include <QUrl>
 #include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
@@ -337,8 +339,12 @@ void MainWindow::setupConvertUi(QLayout *parentLayout)
     m_cancelConvertButton = new QPushButton(tr("取消转换"), this);
     m_cancelConvertButton->setMinimumHeight(32);
     m_cancelConvertButton->setCursor(Qt::PointingHandCursor);
+    m_openOutputButton = new QPushButton(tr("打开成品"), this);
+    m_openOutputButton->setMinimumHeight(32);
+    m_openOutputButton->setCursor(Qt::PointingHandCursor);
     actionRow->addWidget(m_startConvertButton);
     actionRow->addWidget(m_cancelConvertButton);
+    actionRow->addWidget(m_openOutputButton);
     actionRow->addStretch(1);
 
     auto *progressRow = new QHBoxLayout();
@@ -364,6 +370,7 @@ void MainWindow::setupConvertUi(QLayout *parentLayout)
     connect(m_browseDirButton, &QPushButton::clicked, this, &MainWindow::onBrowseOutputDir);
     connect(m_startConvertButton, &QPushButton::clicked, this, &MainWindow::onStartConvert);
     connect(m_cancelConvertButton, &QPushButton::clicked, this, &MainWindow::onCancelConvert);
+    connect(m_openOutputButton, &QPushButton::clicked, this, &MainWindow::onOpenOutputFile);
     connect(m_formatCombo, &QComboBox::currentIndexChanged, this, [this](int) {
         updateOutputPreview();
     });
@@ -383,6 +390,8 @@ void MainWindow::updateConvertButtons()
     m_browseDirButton->setEnabled(!locked);
     m_startConvertButton->setEnabled(hasFile && !locked);
     m_cancelConvertButton->setEnabled(hasFile && locked);
+    m_openOutputButton->setEnabled(
+        !locked && m_convertOk && QFileInfo::exists(m_convertOutputPath));
 }
 
 void MainWindow::setConvertProgress(int percent)
@@ -586,6 +595,23 @@ void MainWindow::onStartConvert()
     }
 
     startConvert(output, format, crf);
+}
+
+void MainWindow::onOpenOutputFile()
+{
+    if (m_convertOutputPath.isEmpty() || !QFileInfo::exists(m_convertOutputPath)) {
+        showStatus(tr("成品文件不存在"), true);
+        updateConvertButtons();
+        return;
+    }
+
+    const QString native = QDir::toNativeSeparators(QFileInfo(m_convertOutputPath).absoluteFilePath());
+#ifdef Q_OS_WIN
+    QProcess::startDetached(QStringLiteral("explorer.exe"),
+                            QStringList{QStringLiteral("/select,") + native});
+#else
+    QDesktopServices::openUrl(QUrl::fromLocalFile(native));
+#endif
 }
 
 void MainWindow::onCancelConvert()

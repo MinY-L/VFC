@@ -47,6 +47,7 @@ private slots:
     void onBrowseOutputDir();
     void onStartConvert();
     void onCancelConvert();
+    void onOpenOutputFile();
     void onSmoothProgressTick();
 
 private:
@@ -101,6 +102,7 @@ private:
     QPushButton *m_browseDirButton = nullptr;
     QPushButton *m_startConvertButton = nullptr;
     QPushButton *m_cancelConvertButton = nullptr;
+    QPushButton *m_openOutputButton = nullptr;
     QProgressBar *m_progressBar = nullptr;
     QLabel *m_progressLabel = nullptr;
     QTimer *m_progressSmoothTimer = nullptr;
