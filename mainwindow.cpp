@@ -517,6 +517,46 @@ void MainWindow::onBrowseOutputDir()
     m_outputDirEdit->setText(QDir::toNativeSeparators(dir));
 }
 
+void MainWindow::setConvertOutputDir(const QString &dir)
+{
+    if (!m_outputDirEdit)
+        return;
+    m_outputDirEdit->setText(QDir::toNativeSeparators(dir));
+}
+
+bool MainWindow::setConvertFormat(const QString &format)
+{
+    if (!m_formatCombo)
+        return false;
+    const int idx = m_formatCombo->findData(format.toLower());
+    if (idx < 0)
+        return false;
+    m_formatCombo->setCurrentIndex(idx);
+    return true;
+}
+
+bool MainWindow::setConvertQualityCrf(int crf)
+{
+    if (!m_qualityCombo)
+        return false;
+    const int idx = m_qualityCombo->findData(crf);
+    if (idx < 0)
+        return false;
+    m_qualityCombo->setCurrentIndex(idx);
+    return true;
+}
+
+bool MainWindow::startConversion()
+{
+    onStartConvert();
+    return m_converting;
+}
+
+void MainWindow::cancelConversion()
+{
+    onCancelConvert();
+}
+
 void MainWindow::onStartConvert()
 {
     if (m_currentFile.isEmpty() || m_converting)
@@ -645,6 +685,7 @@ void MainWindow::startConvert(const QString &output, const QString &format, int 
     });
 
     m_converting = true;
+    m_convertOk = false;
     setConvertProgressRatio(0.0);
     updateConvertButtons();
     updateBusyState();
@@ -763,6 +804,7 @@ void MainWindow::finishConvert(bool success, const QString &message, bool isErro
 {
     m_converting = false;
     m_convertCancelRequested = false;
+    m_convertOk = success;
     if (m_progressSmoothTimer)
         m_progressSmoothTimer->stop();
     updateConvertButtons();

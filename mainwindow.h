@@ -30,6 +30,18 @@ public:
     bool lastThumbOk() const { return m_thumbOk; }
     QString currentFilePath() const { return m_currentFile; }
 
+    void setConvertOutputDir(const QString &dir);
+    bool setConvertFormat(const QString &format);
+    bool setConvertQualityCrf(int crf);
+    bool startConversion();
+    void cancelConversion();
+    QString plannedOutputPath() const;
+    QString lastConvertOutputPath() const { return m_convertOutputPath; }
+    QString convertTempPath() const { return m_convertTempPath; }
+    bool lastConvertOk() const { return m_convertOk; }
+    bool isConverting() const { return m_converting; }
+    QString ffmpegToolPath() const { return resolveTool(QStringLiteral("ffmpeg")); }
+
 private slots:
     void onOpenVideo();
     void onBrowseOutputDir();
@@ -45,7 +57,6 @@ private:
     void updateOutputPreview();
     void setConvertProgress(int percent);
     void setConvertProgressRatio(double ratio);
-    QString plannedOutputPath() const;
     QString uniqueOutputPath(const QString &preferred) const;
     QString partPathFor(const QString &output) const;
     QStringList buildConvertArgs(const QString &input,
@@ -114,6 +125,7 @@ private:
     bool m_thumbOk = false;
     bool m_converting = false;
     bool m_convertCancelRequested = false;
+    bool m_convertOk = false;
 
     double m_progressTimeSec = 0.0;
     double m_progressSpeed = 1.0;
