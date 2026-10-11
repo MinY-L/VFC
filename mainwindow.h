@@ -46,6 +46,8 @@ private:
     void setConvertProgress(int percent);
     void setConvertProgressRatio(double ratio);
     QString plannedOutputPath() const;
+    QString uniqueOutputPath(const QString &preferred) const;
+    QString partPathFor(const QString &output) const;
     QStringList buildConvertArgs(const QString &input,
                                  const QString &output,
                                  const QString &format,

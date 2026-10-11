@@ -399,6 +399,49 @@ void MainWindow::setConvertProgressRatio(double ratio)
     m_progressLabel->setText(tr("%1%").arg(qBound(0, qRound(ratio * 100.0), 100)));
 }
 
+QString MainWindow::partPathFor(const QString &output) const
+{
+    const QFileInfo outInfo(output);
+    if (outInfo.fileName().isEmpty())
+        return {};
+    return QDir(outInfo.absolutePath()).filePath(
+        outInfo.completeBaseName() + QStringLiteral(".part.") + outInfo.suffix());
+}
+
+QString MainWindow::uniqueOutputPath(const QString &preferred) const
+{
+    const QFileInfo preferredInfo(preferred);
+    if (preferredInfo.fileName().isEmpty())
+        return {};
+
+    const QDir dir = preferredInfo.absoluteDir();
+    const QString stem = preferredInfo.completeBaseName();
+    const QString ext = preferredInfo.suffix();
+
+    auto occupied = [this](const QString &path) {
+        if (path.isEmpty())
+            return true;
+        const QFileInfo info(path);
+        if (info.exists())
+            return true;
+        if (QFileInfo::exists(partPathFor(path)))
+            return true;
+        if (!m_currentFile.isEmpty() && info == QFileInfo(m_currentFile))
+            return true;
+        return false;
+    };
+
+    for (int n = 0; n < 10000; ++n) {
+        const QString name = (n == 0)
+            ? (stem + QLatin1Char('.') + ext)
+            : (stem + QLatin1Char('_') + QString::number(n) + QLatin1Char('.') + ext);
+        const QString path = dir.filePath(name);
+        if (!occupied(path))
+            return QFileInfo(path).absoluteFilePath();
+    }
+    return {};
+}
+
 QString MainWindow::plannedOutputPath() const
 {
     if (m_currentFile.isEmpty() || !m_outputDirEdit || !m_formatCombo)
@@ -408,7 +451,8 @@ QString MainWindow::plannedOutputPath() const
         return {};
     const QString ext = m_formatCombo->currentData().toString();
     const QString baseName = QFileInfo(m_currentFile).completeBaseName();
-    return QDir(dir).filePath(baseName + QStringLiteral("_converted.") + ext);
+    const QString preferred = QDir(dir).filePath(baseName + QStringLiteral("_converted.") + ext);
+    return uniqueOutputPath(preferred);
 }
 
 void MainWindow::updateOutputPreview()
@@ -558,12 +602,7 @@ void MainWindow::startConvert(const QString &output, const QString &format, int 
     m_convertCancelRequested = false;
     m_convertOutputPath = output;
     // ffmpeg 靠扩展名选封装格式，临时文件必须仍以 .mp4/.mkv/.mov/.avi 结尾。
-    // 写成 xxx.mp4.part 会导致 Unable to choose an output format，转换直接失败。
-    {
-        const QFileInfo outInfo(output);
-        m_convertTempPath = QDir(outInfo.absolutePath()).filePath(
-            outInfo.completeBaseName() + QStringLiteral(".part.") + outInfo.suffix());
-    }
+    m_convertTempPath = partPathFor(output);
     QFile::remove(m_convertTempPath);
     m_convertProgressBuf.clear();
     m_convertErrorBuf.clear();
@@ -728,6 +767,8 @@ void MainWindow::finishConvert(bool success, const QString &message, bool isErro
         m_progressSmoothTimer->stop();
     updateConvertButtons();
     updateBusyState();
+    if (success)
+        updateOutputPreview();
     showStatus(message, isError);
     if (!success && !isError)
         setConvertProgressRatio(0.0);
@@ -740,8 +781,8 @@ void MainWindow::stopConvertProcess()
     m_convertProcess->disconnect();
     if (m_convertProcess->state() != QProcess::NotRunning) {
         m_convertProcess->kill();
-        // 等文件句柄释放，否则 Windows 上删不掉半成品
-        m_convertProcess->waitForFinished(2000);
+        // 等文件句柄释放，否则 Windows 上删不掉半成品；删不掉还有 300ms/1200ms 重试
+        m_convertProcess->waitForFinished(200);
     }
     m_convertProcess->deleteLater();
     m_convertProcess = nullptr;
@@ -787,13 +828,20 @@ bool MainWindow::promoteConvertOutput()
     if (QFileInfo(m_convertTempPath) == QFileInfo(m_convertOutputPath))
         return true;
 
-    QFile::remove(m_convertOutputPath);
-    if (QFile::rename(m_convertTempPath, m_convertOutputPath)) {
+    QString dest = m_convertOutputPath;
+    if (QFileInfo::exists(dest))
+        dest = uniqueOutputPath(dest);
+    if (dest.isEmpty())
+        return false;
+
+    if (QFile::rename(m_convertTempPath, dest)) {
+        m_convertOutputPath = dest;
         m_convertTempPath.clear();
         return true;
     }
-    if (QFile::copy(m_convertTempPath, m_convertOutputPath)) {
+    if (QFile::copy(m_convertTempPath, dest)) {
         QFile::remove(m_convertTempPath);
+        m_convertOutputPath = dest;
         m_convertTempPath.clear();
         return true;
     }
