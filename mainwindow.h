@@ -1,6 +1,8 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include <QByteArray>
+#include <QElapsedTimer>
 #include <QMainWindow>
 #include <QProcess>
 #include <QString>
@@ -12,6 +14,7 @@ class QLineEdit;
 class QPixmap;
 class QProgressBar;
 class QPushButton;
+class QTimer;
 
 class MainWindow : public QMainWindow
 {
@@ -32,6 +35,7 @@ private slots:
     void onBrowseOutputDir();
     void onStartConvert();
     void onCancelConvert();
+    void onSmoothProgressTick();
 
 private:
     void setupUi();
@@ -40,7 +44,20 @@ private:
     void updateConvertButtons();
     void updateOutputPreview();
     void setConvertProgress(int percent);
+    void setConvertProgressRatio(double ratio);
     QString plannedOutputPath() const;
+    QStringList buildConvertArgs(const QString &input,
+                                 const QString &output,
+                                 const QString &format,
+                                 int crf) const;
+    void startConvert(const QString &output, const QString &format, int crf);
+    void onConvertFinished(QProcess *process, int exitCode, QProcess::ExitStatus exitStatus);
+    void onConvertStdout(QProcess *process);
+    void parseConvertProgressLine(const QString &line);
+    void finishConvert(bool success, const QString &message, bool isError);
+    void stopConvertProcess();
+    void removeIncompleteOutput();
+    bool promoteConvertOutput();
     void startProbe(const QString &filePath);
     void startThumbnail(const QString &filePath, int seekSeconds);
     void onProbeFinished(QProcess *process, int exitCode, QProcess::ExitStatus exitStatus);
@@ -73,22 +90,34 @@ private:
     QPushButton *m_cancelConvertButton = nullptr;
     QProgressBar *m_progressBar = nullptr;
     QLabel *m_progressLabel = nullptr;
+    QTimer *m_progressSmoothTimer = nullptr;
 
     QProcess *m_probeProcess = nullptr;
     QProcess *m_thumbProcess = nullptr;
+    QProcess *m_convertProcess = nullptr;
 
     QString m_currentFile;
     QString m_lastDir;
     QString m_thumbPath;
+    QString m_convertOutputPath;
+    QString m_convertTempPath;
 
     // 递增后忽略过期的 QProcess 回调，避免旧任务写回新文件的结果
     quint64 m_jobId = 0;
+    quint64 m_convertJobId = 0;
     double m_durationSec = -1.0;
     int m_thumbSeekSeconds = 1;
     bool m_thumbRetryUsed = false;
     bool m_probeOk = false;
     bool m_thumbOk = false;
     bool m_converting = false;
+    bool m_convertCancelRequested = false;
+
+    double m_progressTimeSec = 0.0;
+    double m_progressSpeed = 1.0;
+    QElapsedTimer m_progressClock;
+    QByteArray m_convertProgressBuf;
+    QByteArray m_convertErrorBuf;
 
     mutable QString m_cachedFfprobe;
     mutable QString m_cachedFfmpeg;

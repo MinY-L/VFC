@@ -146,6 +146,35 @@ bool isAttachedPic(const QJsonObject &stream)
                .toInt() != 0;
 }
 
+double parseFfmpegTime(const QString &text)
+{
+    const QStringList parts = text.split(QLatin1Char(':'));
+    if (parts.size() != 3)
+        return -1.0;
+    bool okH = false;
+    bool okM = false;
+    bool okS = false;
+    const double h = parts.at(0).toDouble(&okH);
+    const double m = parts.at(1).toDouble(&okM);
+    const double s = parts.at(2).toDouble(&okS);
+    if (!okH || !okM || !okS)
+        return -1.0;
+    return h * 3600.0 + m * 60.0 + s;
+}
+
+QString lastErrorSnippet(const QByteArray &raw)
+{
+    QString text = QString::fromUtf8(raw);
+    if (text.trimmed().isEmpty())
+        text = QString::fromLocal8Bit(raw);
+    text = text.trimmed();
+    if (text.size() > 300)
+        text = text.right(300);
+    text.replace(QLatin1Char('\n'), QLatin1Char(' '));
+    text.replace(QLatin1Char('\r'), QLatin1Char(' '));
+    return text.simplified();
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
@@ -153,13 +182,21 @@ MainWindow::MainWindow(QWidget *parent)
 {
     m_lastDir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
     setupUi();
+    m_progressSmoothTimer = new QTimer(this);
+    m_progressSmoothTimer->setInterval(50);
+    connect(m_progressSmoothTimer, &QTimer::timeout, this, &MainWindow::onSmoothProgressTick);
 }
 
 MainWindow::~MainWindow()
 {
     ++m_jobId;
+    ++m_convertJobId;
+    if (m_progressSmoothTimer)
+        m_progressSmoothTimer->stop();
     stopProcessForDestroy(m_probeProcess);
     stopProcessForDestroy(m_thumbProcess);
+    stopConvertProcess();
+    removeIncompleteOutput();
     cleanupThumbFile(false);
 }
 
@@ -299,13 +336,14 @@ void MainWindow::setupConvertUi(QLayout *parentLayout)
     m_startConvertButton->setCursor(Qt::PointingHandCursor);
     m_cancelConvertButton = new QPushButton(tr("取消转换"), this);
     m_cancelConvertButton->setMinimumHeight(32);
+    m_cancelConvertButton->setCursor(Qt::PointingHandCursor);
     actionRow->addWidget(m_startConvertButton);
     actionRow->addWidget(m_cancelConvertButton);
     actionRow->addStretch(1);
 
     auto *progressRow = new QHBoxLayout();
     m_progressBar = new QProgressBar(this);
-    m_progressBar->setRange(0, 100);
+    m_progressBar->setRange(0, 1000);
     m_progressBar->setValue(0);
     m_progressBar->setTextVisible(false);
     m_progressBar->setFixedHeight(22);
@@ -337,15 +375,28 @@ void MainWindow::setupConvertUi(QLayout *parentLayout)
 void MainWindow::updateConvertButtons()
 {
     const bool hasFile = !m_currentFile.isEmpty();
-    m_startConvertButton->setEnabled(hasFile && !m_converting);
-    m_cancelConvertButton->setEnabled(hasFile && m_converting);
+    const bool locked = m_converting;
+    m_openButton->setEnabled(!locked);
+    m_formatCombo->setEnabled(!locked);
+    m_qualityCombo->setEnabled(!locked);
+    m_outputDirEdit->setEnabled(!locked);
+    m_browseDirButton->setEnabled(!locked);
+    m_startConvertButton->setEnabled(hasFile && !locked);
+    m_cancelConvertButton->setEnabled(hasFile && locked);
 }
 
 void MainWindow::setConvertProgress(int percent)
 {
-    percent = qBound(0, percent, 100);
-    m_progressBar->setValue(percent);
-    m_progressLabel->setText(tr("%1%").arg(percent));
+    setConvertProgressRatio(percent / 100.0);
+}
+
+void MainWindow::setConvertProgressRatio(double ratio)
+{
+    ratio = qBound(0.0, ratio, 1.0);
+    if (m_progressBar->minimum() != 0 || m_progressBar->maximum() != 1000)
+        m_progressBar->setRange(0, 1000);
+    m_progressBar->setValue(qRound(ratio * 1000.0));
+    m_progressLabel->setText(tr("%1%").arg(qBound(0, qRound(ratio * 100.0), 100)));
 }
 
 QString MainWindow::plannedOutputPath() const
@@ -433,17 +484,329 @@ void MainWindow::onStartConvert()
         return;
     }
 
-    showStatus(tr("转换功能即将接入"));
+    const QString output = plannedOutputPath();
+    if (output.isEmpty()) {
+        showStatus(tr("无法确定输出文件路径"), true);
+        return;
+    }
+    if (QFileInfo(output) == QFileInfo(m_currentFile)) {
+        showStatus(tr("输出文件不能与源文件相同"), true);
+        return;
+    }
+
+    const QString format = m_formatCombo->currentData().toString();
+    const int crf = m_qualityCombo->currentData().toInt();
+    if (format.isEmpty() || crf <= 0) {
+        showStatus(tr("请选择输出格式和质量"), true);
+        return;
+    }
+
+    startConvert(output, format, crf);
 }
 
 void MainWindow::onCancelConvert()
 {
     if (!m_converting)
         return;
+
+    m_convertCancelRequested = true;
+    ++m_convertJobId;
+    if (m_progressSmoothTimer)
+        m_progressSmoothTimer->stop();
+    stopConvertProcess();
+    removeIncompleteOutput();
+    finishConvert(false, tr("已取消转换"), false);
+}
+
+QStringList MainWindow::buildConvertArgs(const QString &input,
+                                         const QString &output,
+                                         const QString &format,
+                                         int crf) const
+{
+    QStringList args;
+    args << QStringLiteral("-hide_banner")
+         << QStringLiteral("-y")
+         << QStringLiteral("-i") << input
+         << QStringLiteral("-map") << QStringLiteral("0:v:0")
+         << QStringLiteral("-map") << QStringLiteral("0:a:0?")
+         << QStringLiteral("-c:v") << QStringLiteral("libx264")
+         << QStringLiteral("-preset") << QStringLiteral("medium")
+         << QStringLiteral("-crf") << QString::number(crf)
+         << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p");
+
+    if (format == QLatin1String("avi")) {
+        args << QStringLiteral("-c:a") << QStringLiteral("libmp3lame")
+             << QStringLiteral("-b:a") << QStringLiteral("192k");
+    } else {
+        args << QStringLiteral("-c:a") << QStringLiteral("aac")
+             << QStringLiteral("-b:a") << QStringLiteral("192k");
+    }
+
+    if (format == QLatin1String("mp4") || format == QLatin1String("mov"))
+        args << QStringLiteral("-movflags") << QStringLiteral("+faststart");
+
+    args << QStringLiteral("-stats_period") << QStringLiteral("0.05")
+         << QStringLiteral("-progress") << QStringLiteral("pipe:1")
+         << QStringLiteral("-nostats")
+         << output;
+    return args;
+}
+
+void MainWindow::startConvert(const QString &output, const QString &format, int crf)
+{
+    const quint64 jobId = ++m_convertJobId;
+    m_convertCancelRequested = false;
+    m_convertOutputPath = output;
+    // ffmpeg 靠扩展名选封装格式，临时文件必须仍以 .mp4/.mkv/.mov/.avi 结尾。
+    // 写成 xxx.mp4.part 会导致 Unable to choose an output format，转换直接失败。
+    {
+        const QFileInfo outInfo(output);
+        m_convertTempPath = QDir(outInfo.absolutePath()).filePath(
+            outInfo.completeBaseName() + QStringLiteral(".part.") + outInfo.suffix());
+    }
+    QFile::remove(m_convertTempPath);
+    m_convertProgressBuf.clear();
+    m_convertErrorBuf.clear();
+    m_progressTimeSec = 0.0;
+    m_progressSpeed = 1.0;
+    m_progressClock.restart();
+
+    abandonProcess(m_convertProcess);
+    m_convertProcess = new QProcess(this);
+    m_convertProcess->setProcessChannelMode(QProcess::SeparateChannels);
+
+    QProcess *proc = m_convertProcess;
+    connect(proc, &QProcess::errorOccurred, this,
+            [this, jobId](QProcess::ProcessError error) {
+        if (jobId != m_convertJobId)
+            return;
+        if (error == QProcess::FailedToStart) {
+            finishConvert(false,
+                          tr("无法启动 ffmpeg，请确认已安装 FFmpeg 并将其加入 PATH"),
+                          true);
+        }
+    });
+    connect(proc, &QProcess::readyReadStandardOutput, this, [this, jobId, proc]() {
+        if (jobId != m_convertJobId)
+            return;
+        onConvertStdout(proc);
+    });
+    connect(proc, &QProcess::readyReadStandardError, this, [this, jobId, proc]() {
+        if (jobId != m_convertJobId)
+            return;
+        m_convertErrorBuf += proc->readAllStandardError();
+        if (m_convertErrorBuf.size() > 8192)
+            m_convertErrorBuf = m_convertErrorBuf.right(8192);
+    });
+    connect(proc, &QProcess::finished, this,
+            [this, jobId, proc](int exitCode, QProcess::ExitStatus exitStatus) {
+        if (jobId != m_convertJobId)
+            return;
+        onConvertFinished(proc, exitCode, exitStatus);
+    });
+
+    m_converting = true;
+    setConvertProgressRatio(0.0);
+    updateConvertButtons();
+    updateBusyState();
+    if (m_progressSmoothTimer)
+        m_progressSmoothTimer->start();
+    showStatus(tr("正在转换：%1").arg(QFileInfo(output).fileName()));
+
+    proc->start(resolveTool(QStringLiteral("ffmpeg")),
+                buildConvertArgs(m_currentFile, m_convertTempPath, format, crf));
+}
+
+void MainWindow::onConvertStdout(QProcess *process)
+{
+    if (!process)
+        return;
+    m_convertProgressBuf += process->readAllStandardOutput();
+    m_convertProgressBuf.replace('\r', '\n');
+    int idx = 0;
+    while ((idx = m_convertProgressBuf.indexOf('\n')) >= 0) {
+        const QByteArray line = m_convertProgressBuf.left(idx).trimmed();
+        m_convertProgressBuf.remove(0, idx + 1);
+        if (!line.isEmpty())
+            parseConvertProgressLine(QString::fromUtf8(line));
+    }
+}
+
+void MainWindow::parseConvertProgressLine(const QString &line)
+{
+    if (line.startsWith(QLatin1String("out_time="))) {
+        const double sec = parseFfmpegTime(line.section(QLatin1Char('='), 1));
+        if (sec >= 0.0) {
+            m_progressTimeSec = sec;
+            m_progressClock.restart();
+            if (m_durationSec > 0.0)
+                setConvertProgressRatio(sec / m_durationSec);
+        }
+        return;
+    }
+
+    if (line.startsWith(QLatin1String("out_time_us="))) {
+        bool ok = false;
+        const qint64 us = line.section(QLatin1Char('='), 1).toLongLong(&ok);
+        if (ok && us >= 0) {
+            m_progressTimeSec = us / 1000000.0;
+            m_progressClock.restart();
+            if (m_durationSec > 0.0)
+                setConvertProgressRatio(m_progressTimeSec / m_durationSec);
+        }
+        return;
+    }
+
+    if (line.startsWith(QLatin1String("speed="))) {
+        QString value = line.section(QLatin1Char('='), 1);
+        value.remove(QLatin1Char('x'));
+        bool ok = false;
+        const double speed = value.toDouble(&ok);
+        if (ok && speed > 0.0)
+            m_progressSpeed = speed;
+        return;
+    }
+
+    if (line == QLatin1String("progress=end")) {
+        m_progressTimeSec = m_durationSec > 0.0 ? m_durationSec : m_progressTimeSec;
+        setConvertProgressRatio(1.0);
+    }
+}
+
+void MainWindow::onSmoothProgressTick()
+{
+    if (!m_converting || m_durationSec <= 0.0)
+        return;
+
+    const double estimated =
+        m_progressTimeSec + m_progressSpeed * (m_progressClock.elapsed() / 1000.0);
+    double ratio = estimated / m_durationSec;
+    if (ratio > 0.99)
+        ratio = 0.99;
+    if (ratio < 0.0)
+        ratio = 0.0;
+    setConvertProgressRatio(ratio);
+}
+
+void MainWindow::onConvertFinished(QProcess *process, int exitCode, QProcess::ExitStatus exitStatus)
+{
+    if (m_progressSmoothTimer)
+        m_progressSmoothTimer->stop();
+
+    if (!process || process->error() == QProcess::FailedToStart)
+        return;
+    if (m_convertCancelRequested)
+        return;
+
+    m_convertErrorBuf += process->readAllStandardError();
+
+    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+        if (!promoteConvertOutput()) {
+            removeIncompleteOutput();
+            finishConvert(false, tr("转换成功，但无法写入最终文件"), true);
+            return;
+        }
+        setConvertProgressRatio(1.0);
+        finishConvert(true,
+                      tr("转换完成：%1").arg(QDir::toNativeSeparators(m_convertOutputPath)),
+                      false);
+        return;
+    }
+
+    removeIncompleteOutput();
+    QString detail = lastErrorSnippet(m_convertErrorBuf);
+    if (detail.isEmpty())
+        detail = tr("退出码 %1").arg(exitCode);
+    finishConvert(false, tr("转换失败：%1").arg(detail), true);
+}
+
+void MainWindow::finishConvert(bool success, const QString &message, bool isError)
+{
+    m_converting = false;
+    m_convertCancelRequested = false;
+    if (m_progressSmoothTimer)
+        m_progressSmoothTimer->stop();
+    updateConvertButtons();
+    updateBusyState();
+    showStatus(message, isError);
+    if (!success && !isError)
+        setConvertProgressRatio(0.0);
+}
+
+void MainWindow::stopConvertProcess()
+{
+    if (!m_convertProcess)
+        return;
+    m_convertProcess->disconnect();
+    if (m_convertProcess->state() != QProcess::NotRunning) {
+        m_convertProcess->kill();
+        // 等文件句柄释放，否则 Windows 上删不掉半成品
+        m_convertProcess->waitForFinished(2000);
+    }
+    m_convertProcess->deleteLater();
+    m_convertProcess = nullptr;
+}
+
+void MainWindow::removeIncompleteOutput()
+{
+    const QString path = m_convertTempPath;
+    if (path.isEmpty())
+        return;
+
+    auto tryRemove = [path]() {
+        if (QFile::exists(path))
+            QFile::remove(path);
+    };
+    tryRemove();
+    if (!QFile::exists(path)) {
+        m_convertTempPath.clear();
+        return;
+    }
+
+    QTimer::singleShot(300, this, [this, path]() {
+        if (m_converting && m_convertTempPath == path)
+            return;
+        QFile::remove(path);
+    });
+    QTimer::singleShot(1200, this, [this, path]() {
+        if (m_converting && m_convertTempPath == path)
+            return;
+        QFile::remove(path);
+        if (m_convertTempPath == path)
+            m_convertTempPath.clear();
+    });
+}
+
+bool MainWindow::promoteConvertOutput()
+{
+    if (m_convertTempPath.isEmpty() || m_convertOutputPath.isEmpty())
+        return false;
+    if (!QFile::exists(m_convertTempPath))
+        return false;
+
+    if (QFileInfo(m_convertTempPath) == QFileInfo(m_convertOutputPath))
+        return true;
+
+    QFile::remove(m_convertOutputPath);
+    if (QFile::rename(m_convertTempPath, m_convertOutputPath)) {
+        m_convertTempPath.clear();
+        return true;
+    }
+    if (QFile::copy(m_convertTempPath, m_convertOutputPath)) {
+        QFile::remove(m_convertTempPath);
+        m_convertTempPath.clear();
+        return true;
+    }
+    return false;
 }
 
 void MainWindow::loadVideo(const QString &filePath)
 {
+    if (m_converting) {
+        showStatus(tr("请先取消当前转换"), true);
+        return;
+    }
+
     const QFileInfo info(filePath);
     if (!info.exists() || !info.isFile()) {
         showStatus(tr("文件不存在：%1").arg(QDir::toNativeSeparators(filePath)), true);
