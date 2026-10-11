@@ -14,8 +14,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QComboBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPixmap>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QSettings>
 #include <QSizePolicy>
@@ -163,7 +166,6 @@ MainWindow::~MainWindow()
 void MainWindow::setupUi()
 {
     setWindowTitle(tr("视频格式转换器"));
-    resize(820, 480);
 
     auto *central = new QWidget(this);
     setCentralWidget(central);
@@ -230,10 +232,148 @@ void MainWindow::setupUi()
 
     root->addLayout(top);
     root->addLayout(body);
-    root->addStretch(1);
+    setupConvertUi(root);
 
     statusBar()->showMessage(tr("请打开一个视频文件"));
     connect(m_openButton, &QPushButton::clicked, this, &MainWindow::onOpenVideo);
+    updateConvertButtons();
+    updateOutputPreview();
+    resize(820, sizeHint().height());
+}
+
+void MainWindow::setupConvertUi(QLayout *parentLayout)
+{
+    auto *box = new QGroupBox(tr("转换"), this);
+    box->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    auto *layout = new QVBoxLayout(box);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(10);
+
+    auto *optionsRow = new QHBoxLayout();
+    auto *formatLabel = new QLabel(tr("输出格式："), this);
+    m_formatCombo = new QComboBox(this);
+    m_formatCombo->addItem(QStringLiteral("MP4"), QStringLiteral("mp4"));
+    m_formatCombo->addItem(QStringLiteral("MKV"), QStringLiteral("mkv"));
+    m_formatCombo->addItem(QStringLiteral("MOV"), QStringLiteral("mov"));
+    m_formatCombo->addItem(QStringLiteral("AVI"), QStringLiteral("avi"));
+    m_formatCombo->setMinimumWidth(100);
+
+    auto *qualityLabel = new QLabel(tr("质量："), this);
+    m_qualityCombo = new QComboBox(this);
+    m_qualityCombo->addItem(tr("高"), 18);
+    m_qualityCombo->addItem(tr("中"), 23);
+    m_qualityCombo->addItem(tr("低"), 28);
+    m_qualityCombo->setCurrentIndex(1);
+    m_qualityCombo->setMinimumWidth(100);
+    m_qualityCombo->setToolTip(tr("高 = CRF 18，中 = CRF 23，低 = CRF 28"));
+
+    optionsRow->addWidget(formatLabel);
+    optionsRow->addWidget(m_formatCombo);
+    optionsRow->addSpacing(16);
+    optionsRow->addWidget(qualityLabel);
+    optionsRow->addWidget(m_qualityCombo);
+    optionsRow->addStretch(1);
+
+    auto *dirRow = new QHBoxLayout();
+    auto *dirLabel = new QLabel(tr("输出目录："), this);
+    m_outputDirEdit = new QLineEdit(this);
+    m_outputDirEdit->setPlaceholderText(tr("请选择输出目录"));
+    m_outputDirEdit->setClearButtonEnabled(true);
+    m_browseDirButton = new QPushButton(tr("浏览…"), this);
+
+    dirRow->addWidget(dirLabel);
+    dirRow->addWidget(m_outputDirEdit, 1);
+    dirRow->addWidget(m_browseDirButton);
+
+    auto *fileRow = new QHBoxLayout();
+    auto *fileLabel = new QLabel(tr("输出文件："), this);
+    m_outputFileLabel = new QLabel(tr("未选择视频"), this);
+    m_outputFileLabel->setWordWrap(true);
+    m_outputFileLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    fileRow->addWidget(fileLabel, 0, Qt::AlignTop);
+    fileRow->addWidget(m_outputFileLabel, 1);
+
+    auto *actionRow = new QHBoxLayout();
+    m_startConvertButton = new QPushButton(tr("开始转换"), this);
+    m_startConvertButton->setMinimumHeight(32);
+    m_startConvertButton->setCursor(Qt::PointingHandCursor);
+    m_cancelConvertButton = new QPushButton(tr("取消转换"), this);
+    m_cancelConvertButton->setMinimumHeight(32);
+    actionRow->addWidget(m_startConvertButton);
+    actionRow->addWidget(m_cancelConvertButton);
+    actionRow->addStretch(1);
+
+    auto *progressRow = new QHBoxLayout();
+    m_progressBar = new QProgressBar(this);
+    m_progressBar->setRange(0, 100);
+    m_progressBar->setValue(0);
+    m_progressBar->setTextVisible(false);
+    m_progressBar->setFixedHeight(22);
+    m_progressBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_progressLabel = new QLabel(tr("0%"), this);
+    m_progressLabel->setMinimumWidth(44);
+    m_progressLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    progressRow->addWidget(m_progressBar, 1);
+    progressRow->addWidget(m_progressLabel);
+
+    layout->addLayout(optionsRow);
+    layout->addLayout(dirRow);
+    layout->addLayout(fileRow);
+    layout->addLayout(actionRow);
+    layout->addLayout(progressRow);
+    parentLayout->addWidget(box);
+
+    connect(m_browseDirButton, &QPushButton::clicked, this, &MainWindow::onBrowseOutputDir);
+    connect(m_startConvertButton, &QPushButton::clicked, this, &MainWindow::onStartConvert);
+    connect(m_cancelConvertButton, &QPushButton::clicked, this, &MainWindow::onCancelConvert);
+    connect(m_formatCombo, &QComboBox::currentIndexChanged, this, [this](int) {
+        updateOutputPreview();
+    });
+    connect(m_outputDirEdit, &QLineEdit::textChanged, this, [this](const QString &) {
+        updateOutputPreview();
+    });
+}
+
+void MainWindow::updateConvertButtons()
+{
+    const bool hasFile = !m_currentFile.isEmpty();
+    m_startConvertButton->setEnabled(hasFile && !m_converting);
+    m_cancelConvertButton->setEnabled(hasFile && m_converting);
+}
+
+void MainWindow::setConvertProgress(int percent)
+{
+    percent = qBound(0, percent, 100);
+    m_progressBar->setValue(percent);
+    m_progressLabel->setText(tr("%1%").arg(percent));
+}
+
+QString MainWindow::plannedOutputPath() const
+{
+    if (m_currentFile.isEmpty() || !m_outputDirEdit || !m_formatCombo)
+        return {};
+    const QString dir = m_outputDirEdit->text().trimmed();
+    if (dir.isEmpty())
+        return {};
+    const QString ext = m_formatCombo->currentData().toString();
+    const QString baseName = QFileInfo(m_currentFile).completeBaseName();
+    return QDir(dir).filePath(baseName + QStringLiteral("_converted.") + ext);
+}
+
+void MainWindow::updateOutputPreview()
+{
+    if (!m_outputFileLabel)
+        return;
+    if (m_currentFile.isEmpty()) {
+        m_outputFileLabel->setText(tr("未选择视频"));
+        return;
+    }
+    const QString path = plannedOutputPath();
+    if (path.isEmpty()) {
+        m_outputFileLabel->setText(tr("请先选择输出目录"));
+        return;
+    }
+    m_outputFileLabel->setText(QDir::toNativeSeparators(path));
 }
 
 void MainWindow::resetMediaInfo()
@@ -267,6 +407,41 @@ void MainWindow::onOpenVideo()
     loadVideo(path);
 }
 
+void MainWindow::onBrowseOutputDir()
+{
+    QString startDir = m_outputDirEdit->text().trimmed();
+    if (startDir.isEmpty()) {
+        startDir = m_lastDir.isEmpty()
+            ? QStandardPaths::writableLocation(QStandardPaths::MoviesLocation)
+            : m_lastDir;
+    }
+
+    const QString dir = QFileDialog::getExistingDirectory(this, tr("选择输出目录"), startDir);
+    if (dir.isEmpty())
+        return;
+    m_outputDirEdit->setText(QDir::toNativeSeparators(dir));
+}
+
+void MainWindow::onStartConvert()
+{
+    if (m_currentFile.isEmpty() || m_converting)
+        return;
+
+    const QString dir = m_outputDirEdit->text().trimmed();
+    if (dir.isEmpty() || !QDir(dir).exists()) {
+        showStatus(tr("请选择有效的输出目录"), true);
+        return;
+    }
+
+    showStatus(tr("转换功能即将接入"));
+}
+
+void MainWindow::onCancelConvert()
+{
+    if (!m_converting)
+        return;
+}
+
 void MainWindow::loadVideo(const QString &filePath)
 {
     const QFileInfo info(filePath);
@@ -291,6 +466,10 @@ void MainWindow::loadVideo(const QString &filePath)
     resetMediaInfo();
 
     m_fileNameLabel->setText(QDir::toNativeSeparators(m_currentFile));
+    if (m_outputDirEdit->text().trimmed().isEmpty())
+        m_outputDirEdit->setText(QDir::toNativeSeparators(info.absolutePath()));
+    updateConvertButtons();
+    updateOutputPreview();
     showStatus(tr("正在读取视频信息…"));
     startProbe(m_currentFile);
 }
@@ -298,7 +477,8 @@ void MainWindow::loadVideo(const QString &filePath)
 bool MainWindow::isBusy() const
 {
     return (m_probeProcess && m_probeProcess->state() != QProcess::NotRunning)
-        || (m_thumbProcess && m_thumbProcess->state() != QProcess::NotRunning);
+    || (m_thumbProcess && m_thumbProcess->state() != QProcess::NotRunning)
+        || m_converting;
 }
 
 void MainWindow::startProbe(const QString &filePath)
@@ -477,7 +657,7 @@ void MainWindow::startThumbnail(const QString &filePath, int seekSeconds)
     args << QStringLiteral("-ss") << QString::number(seekSeconds)
          << QStringLiteral("-i") << filePath
          << QStringLiteral("-frames:v") << QStringLiteral("1")
-         << QStringLiteral("-vf") << QStringLiteral("scale=320:-1")
+         << QStringLiteral("-vf") << QStringLiteral("scale=640:-1")
          << QStringLiteral("-y")
          << m_thumbPath;
 

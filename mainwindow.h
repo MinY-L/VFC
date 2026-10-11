@@ -5,8 +5,12 @@
 #include <QProcess>
 #include <QString>
 
+class QComboBox;
 class QLabel;
+class QLayout;
+class QLineEdit;
 class QPixmap;
+class QProgressBar;
 class QPushButton;
 
 class MainWindow : public QMainWindow
@@ -25,10 +29,18 @@ public:
 
 private slots:
     void onOpenVideo();
+    void onBrowseOutputDir();
+    void onStartConvert();
+    void onCancelConvert();
 
 private:
     void setupUi();
+    void setupConvertUi(QLayout *parentLayout);
     void resetMediaInfo();
+    void updateConvertButtons();
+    void updateOutputPreview();
+    void setConvertProgress(int percent);
+    QString plannedOutputPath() const;
     void startProbe(const QString &filePath);
     void startThumbnail(const QString &filePath, int seekSeconds);
     void onProbeFinished(QProcess *process, int exitCode, QProcess::ExitStatus exitStatus);
@@ -52,6 +64,16 @@ private:
     QLabel *m_bitrateLabel = nullptr;
     QLabel *m_audioCodecLabel = nullptr;
 
+    QComboBox *m_formatCombo = nullptr;
+    QComboBox *m_qualityCombo = nullptr;
+    QLineEdit *m_outputDirEdit = nullptr;
+    QLabel *m_outputFileLabel = nullptr;
+    QPushButton *m_browseDirButton = nullptr;
+    QPushButton *m_startConvertButton = nullptr;
+    QPushButton *m_cancelConvertButton = nullptr;
+    QProgressBar *m_progressBar = nullptr;
+    QLabel *m_progressLabel = nullptr;
+
     QProcess *m_probeProcess = nullptr;
     QProcess *m_thumbProcess = nullptr;
 
@@ -66,6 +88,7 @@ private:
     bool m_thumbRetryUsed = false;
     bool m_probeOk = false;
     bool m_thumbOk = false;
+    bool m_converting = false;
 
     mutable QString m_cachedFfprobe;
     mutable QString m_cachedFfmpeg;
