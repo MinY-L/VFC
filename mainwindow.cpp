@@ -310,7 +310,7 @@ void MainWindow::setupUi()
     m_thumbLabel = new ThumbView(this);
 
     auto *infoBox = new QGroupBox(tr("媒体信息"), this);
-    infoBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    infoBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     auto *form = new QFormLayout(infoBox);
     form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
     form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
@@ -343,11 +343,11 @@ void MainWindow::setupUi()
     auto *body = new QGridLayout();
     body->setSpacing(12);
     body->addWidget(m_thumbLabel, 0, 0, Qt::AlignTop);
-    body->addWidget(infoBox, 0, 1, Qt::AlignTop);
+    body->addWidget(infoBox, 0, 1);
     body->setColumnStretch(0, 1);
     body->setColumnStretch(1, 1);
 
-    root->setSizeConstraint(QLayout::SetNoConstraint);
+    central->setMinimumSize(780, 620);
     root->addLayout(top);
     root->addLayout(body, 0);
     setupLogUi(root);
