@@ -3,16 +3,21 @@
 
 #include <QByteArray>
 #include <QElapsedTimer>
+#include <QList>
 #include <QMainWindow>
 #include <QProcess>
 #include <QString>
 
 class QComboBox;
+class QFormLayout;
+class QGroupBox;
+class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
+class QResizeEvent;
 class QTimer;
 class QVBoxLayout;
 class ThumbView;
@@ -52,9 +57,14 @@ private slots:
     void onClearLog();
     void onSmoothProgressTick();
 
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+
 private:
     void setupUi();
     void setupConvertUi(QVBoxLayout *parentLayout);
+    void updateMediaInfoLayout();
+    void clearInfoColumn(QFormLayout *form);
     void resetMediaInfo();
     void updateConvertButtons();
     void updateOutputPreview();
@@ -91,12 +101,26 @@ private:
     QPushButton *m_openButton = nullptr;
     QLabel *m_fileNameLabel = nullptr;
     ThumbView *m_thumbLabel = nullptr;
+    QGroupBox *m_infoBox = nullptr;
+    QHBoxLayout *m_infoOuter = nullptr;
+    QFormLayout *m_infoCol0 = nullptr;
+    QFormLayout *m_infoCol1 = nullptr;
+    QList<QLabel *> m_infoTitles;
+    QList<QLabel *> m_infoValues;
+    int m_infoFirstColCount = 0;
+    bool m_updatingInfoLayout = false;
+    QGroupBox *m_logBox = nullptr;
+    QGroupBox *m_convertBox = nullptr;
     QLabel *m_durationLabel = nullptr;
+    QLabel *m_fileSizeLabel = nullptr;
+    QLabel *m_containerLabel = nullptr;
     QLabel *m_resolutionLabel = nullptr;
+    QLabel *m_pixelFormatLabel = nullptr;
     QLabel *m_videoCodecLabel = nullptr;
     QLabel *m_frameRateLabel = nullptr;
     QLabel *m_bitrateLabel = nullptr;
     QLabel *m_audioCodecLabel = nullptr;
+    QLabel *m_audioParamsLabel = nullptr;
     QPlainTextEdit *m_logEdit = nullptr;
     QPushButton *m_clearLogButton = nullptr;
 

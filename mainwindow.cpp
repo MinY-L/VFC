@@ -26,6 +26,7 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollBar>
 #include <QTime>
 #include <QSettings>
@@ -99,6 +100,86 @@ QString formatDuration(double seconds)
         .arg(m, 2, 10, QLatin1Char('0'))
         .arg(s, 2, 10, QLatin1Char('0'))
         .arg(ms, 3, 10, QLatin1Char('0'));
+}
+
+QString formatBitrate(qint64 bps);
+
+QString formatFileSize(qint64 bytes)
+{
+    if (bytes < 0)
+        return QObject::tr("未知");
+    if (bytes < 1024)
+        return QObject::tr("%1 B").arg(bytes);
+    if (bytes < 1024 * 1024)
+        return QObject::tr("%1 KB").arg(bytes / 1024.0, 0, 'f', 1);
+    if (bytes < 1024LL * 1024 * 1024)
+        return QObject::tr("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 2);
+    return QObject::tr("%1 GB").arg(bytes / (1024.0 * 1024.0 * 1024.0), 0, 'f', 2);
+}
+
+QString formatPixelFormat(const QJsonObject &video)
+{
+    const QString pix = jsonToString(video.value(QStringLiteral("pix_fmt")));
+    if (pix.isEmpty())
+        return QObject::tr("未知");
+    bool bitsOk = false;
+    const qint64 bitCount = jsonToInt64(video.value(QStringLiteral("bits_per_raw_sample")), &bitsOk);
+    if (bitsOk && bitCount > 0)
+        return QStringLiteral("%1（%2 bit）").arg(pix).arg(bitCount);
+    return pix;
+}
+
+QString formatAudioParams(const QJsonObject &audio)
+{
+    QStringList parts;
+    bool rateOk = false;
+    const double rate = jsonToDouble(audio.value(QStringLiteral("sample_rate")), &rateOk);
+    if (rateOk && rate > 0.0) {
+        if (std::fmod(rate, 1000.0) == 0.0)
+            parts << QObject::tr("%1 kHz").arg(static_cast<int>(rate / 1000.0));
+        else
+            parts << QObject::tr("%1 Hz").arg(static_cast<int>(rate));
+    }
+
+    const QString layout = jsonToString(audio.value(QStringLiteral("channel_layout")));
+    const int channels = audio.value(QStringLiteral("channels")).toInt();
+    if (layout == QLatin1String("mono") || channels == 1)
+        parts << QObject::tr("单声道");
+    else if (layout == QLatin1String("stereo") || channels == 2)
+        parts << QObject::tr("立体声");
+    else if (channels > 0)
+        parts << QObject::tr("%1 声道").arg(channels);
+    else if (!layout.isEmpty())
+        parts << layout;
+
+    const QString sampleFmt = jsonToString(audio.value(QStringLiteral("sample_fmt")));
+    if (!sampleFmt.isEmpty())
+        parts << sampleFmt;
+
+    bool brOk = false;
+    const qint64 audioBitrate = jsonToInt64(audio.value(QStringLiteral("bit_rate")), &brOk);
+    if (brOk && audioBitrate > 0)
+        parts << formatBitrate(audioBitrate);
+
+    return parts.isEmpty() ? QObject::tr("未知") : parts.join(QStringLiteral(" · "));
+}
+
+QString formatContainer(const QJsonObject &format, const QString &filePath)
+{
+    const QString ext = QFileInfo(filePath).suffix().toUpper();
+    const QString longName = jsonToString(format.value(QStringLiteral("format_long_name")));
+    const QString name = jsonToString(format.value(QStringLiteral("format_name")));
+    if (!ext.isEmpty() && !longName.isEmpty())
+        return QStringLiteral("%1（%2）").arg(ext, longName);
+    if (!longName.isEmpty() && !name.isEmpty() && longName != name)
+        return QStringLiteral("%1（%2）").arg(name, longName);
+    if (!longName.isEmpty())
+        return longName;
+    if (!name.isEmpty())
+        return name;
+    if (!ext.isEmpty())
+        return ext;
+    return QObject::tr("未知");
 }
 
 QString formatBitrate(qint64 bps)
@@ -190,6 +271,43 @@ QString lastErrorSnippet(const QByteArray &raw)
 }
 
 } // namespace
+
+class WrapLabel final : public QLabel
+{
+public:
+    explicit WrapLabel(QWidget *parent = nullptr)
+        : QLabel(parent)
+    {
+        setWordWrap(true);
+        setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        setTextInteractionFlags(Qt::TextSelectableByMouse);
+        QSizePolicy policy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        policy.setHeightForWidth(true);
+        setSizePolicy(policy);
+    }
+
+    bool hasHeightForWidth() const override { return true; }
+
+    int heightForWidth(int w) const override
+    {
+        const QRect r = fontMetrics().boundingRect(
+            QRect(0, 0, qMax(1, w), 10000),
+            Qt::TextWordWrap | Qt::AlignLeft | Qt::AlignTop,
+            text());
+        return qMax(fontMetrics().lineSpacing(), r.height());
+    }
+
+    QSize sizeHint() const override
+    {
+        const int w = width() > 1 ? width() : 160;
+        return QSize(QLabel::sizeHint().width(), heightForWidth(w));
+    }
+
+    QSize minimumSizeHint() const override
+    {
+        return QSize(40, heightForWidth(qMax(1, width())));
+    }
+};
 
 class ThumbView final : public QFrame
 {
@@ -309,41 +427,79 @@ void MainWindow::setupUi()
 
     m_thumbLabel = new ThumbView(this);
 
-    auto *infoBox = new QGroupBox(tr("媒体信息"), this);
-    infoBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    auto *form = new QFormLayout(infoBox);
-    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
-    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
-    form->setHorizontalSpacing(16);
-    form->setVerticalSpacing(10);
-    form->setContentsMargins(12, 12, 12, 12);
+    m_infoBox = new QGroupBox(tr("媒体信息"), this);
+    m_infoBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_infoOuter = new QHBoxLayout(m_infoBox);
+    m_infoOuter->setContentsMargins(12, 12, 12, 12);
+    m_infoOuter->setSpacing(20);
+    auto configureInfoForm = [](QFormLayout *form) {
+        form->setLabelAlignment(Qt::AlignRight | Qt::AlignTop);
+        form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
+        form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+        form->setHorizontalSpacing(12);
+        form->setVerticalSpacing(10);
+        form->setContentsMargins(0, 0, 0, 0);
+    };
+    m_infoCol0 = new QFormLayout();
+    m_infoCol1 = new QFormLayout();
+    configureInfoForm(m_infoCol0);
+    configureInfoForm(m_infoCol1);
+    m_infoOuter->addLayout(m_infoCol0, 1);
+    m_infoOuter->addLayout(m_infoCol1, 1);
 
+    auto makeTitle = [this](const QString &text) {
+        auto *lab = new QLabel(text, this);
+        lab->setAlignment(Qt::AlignRight | Qt::AlignTop);
+        return lab;
+    };
     auto makeValue = [this]() {
-        auto *lab = new QLabel(tr("未知"), this);
-        lab->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        lab->setWordWrap(true);
+        auto *lab = new WrapLabel(this);
+        lab->setText(tr("未知"));
         return lab;
     };
 
     m_durationLabel = makeValue();
+    m_fileSizeLabel = makeValue();
+    m_containerLabel = makeValue();
     m_resolutionLabel = makeValue();
+    m_pixelFormatLabel = makeValue();
     m_videoCodecLabel = makeValue();
     m_frameRateLabel = makeValue();
     m_bitrateLabel = makeValue();
     m_audioCodecLabel = makeValue();
+    m_audioParamsLabel = makeValue();
 
-    form->addRow(tr("时长："), m_durationLabel);
-    form->addRow(tr("分辨率："), m_resolutionLabel);
-    form->addRow(tr("视频编码："), m_videoCodecLabel);
-    form->addRow(tr("帧率："), m_frameRateLabel);
-    form->addRow(tr("码率："), m_bitrateLabel);
-    form->addRow(tr("音频编码："), m_audioCodecLabel);
+    m_infoTitles = {
+        makeTitle(tr("时长：")),
+        makeTitle(tr("文件大小：")),
+        makeTitle(tr("容器格式：")),
+        makeTitle(tr("分辨率：")),
+        makeTitle(tr("像素格式：")),
+        makeTitle(tr("视频编码：")),
+        makeTitle(tr("帧率：")),
+        makeTitle(tr("码率：")),
+        makeTitle(tr("音频编码：")),
+        makeTitle(tr("音频参数：")),
+    };
+    m_infoValues = {
+        m_durationLabel,
+        m_fileSizeLabel,
+        m_containerLabel,
+        m_resolutionLabel,
+        m_pixelFormatLabel,
+        m_videoCodecLabel,
+        m_frameRateLabel,
+        m_bitrateLabel,
+        m_audioCodecLabel,
+        m_audioParamsLabel,
+    };
+    m_infoFirstColCount = 0;
+    updateMediaInfoLayout();
 
     auto *body = new QGridLayout();
     body->setSpacing(12);
     body->addWidget(m_thumbLabel, 0, 0, Qt::AlignTop);
-    body->addWidget(infoBox, 0, 1);
+    body->addWidget(m_infoBox, 0, 1, Qt::AlignTop);
     body->setColumnStretch(0, 1);
     body->setColumnStretch(1, 1);
 
@@ -359,11 +515,124 @@ void MainWindow::setupUi()
     updateConvertButtons();
     updateOutputPreview();
     resize(820, sizeHint().height());
+    updateMediaInfoLayout();
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    updateMediaInfoLayout();
+}
+
+void MainWindow::clearInfoColumn(QFormLayout *form)
+{
+    if (!form)
+        return;
+    while (form->rowCount() > 0) {
+        const QFormLayout::TakeRowResult row = form->takeRow(0);
+        if (row.labelItem) {
+            if (QWidget *w = row.labelItem->widget())
+                w->setParent(m_infoBox);
+            delete row.labelItem;
+        }
+        if (row.fieldItem) {
+            if (QWidget *w = row.fieldItem->widget())
+                w->setParent(m_infoBox);
+            delete row.fieldItem;
+        }
+    }
+}
+
+void MainWindow::updateMediaInfoLayout()
+{
+    if (m_updatingInfoLayout)
+        return;
+    if (!m_infoCol0 || !m_infoCol1 || m_infoTitles.size() != m_infoValues.size() || m_infoTitles.isEmpty())
+        return;
+
+    m_updatingInfoLayout = true;
+
+    const int n = m_infoTitles.size();
+    const int vs = qMax(m_infoCol0->verticalSpacing(), 0);
+    const int hs = qMax(m_infoCol0->horizontalSpacing(), 0);
+    const QMargins margins = m_infoOuter ? m_infoOuter->contentsMargins() : QMargins();
+    const int outerSpacing = m_infoOuter ? m_infoOuter->spacing() : 20;
+
+    int targetH = m_thumbLabel ? m_thumbLabel->height() : kThumbMinW * 9 / 16;
+    if (targetH < 80)
+        targetH = kThumbMinW * 9 / 16;
+
+    int chrome = m_infoBox->fontMetrics().height() + 16;
+    const int frame = m_infoBox->height() - m_infoBox->contentsRect().height();
+    if (frame > 12)
+        chrome = frame;
+    const int inner = qMax(0, targetH - chrome - margins.top() - margins.bottom());
+
+    int infoW = m_infoBox->contentsRect().width();
+    if (infoW < 80 && centralWidget()) {
+        const int thumbW = m_thumbLabel ? m_thumbLabel->width() : kThumbMinW;
+        infoW = qMax(80, centralWidget()->contentsRect().width() - 24 - 12 - thumbW);
+    }
+
+    int titleW = 0;
+    for (QLabel *title : m_infoTitles)
+        titleW = qMax(titleW, title->sizeHint().width());
+
+    auto valueWidth = [&](bool twoCol) {
+        const int innerW = qMax(80, infoW - margins.left() - margins.right());
+        if (twoCol)
+            return qMax(60, (innerW - outerSpacing) / 2 - titleW - hs);
+        return qMax(60, innerW - titleW - hs);
+    };
+    auto itemHeight = [&](int index, int vw) {
+        const int th = m_infoTitles.at(index)->fontMetrics().height();
+        const int vh = m_infoValues.at(index)->heightForWidth(qMax(1, vw));
+        return qMax(th, vh);
+    };
+
+    int firstCount = n;
+    for (int pass = 0; pass < 3; ++pass) {
+        const bool twoCol = firstCount < n;
+        const int vw = valueWidth(twoCol);
+        int count = 0;
+        int used = 0;
+        for (int i = 0; i < n; ++i) {
+            const int h = itemHeight(i, vw);
+            const int extra = (count > 0) ? vs : 0;
+            if (count > 0 && used + extra + h > inner)
+                break;
+            used += extra + h;
+            ++count;
+        }
+        if (count < 1)
+            count = 1;
+        if (count == firstCount)
+            break;
+        firstCount = count;
+    }
+    const bool twoColumn = firstCount < n;
+
+    const bool needRebuild = (m_infoCol0->rowCount() == 0 || firstCount != m_infoFirstColCount);
+    if (needRebuild) {
+        m_infoFirstColCount = firstCount;
+        clearInfoColumn(m_infoCol0);
+        clearInfoColumn(m_infoCol1);
+        for (int i = 0; i < n; ++i) {
+            QFormLayout *col = (i < firstCount) ? m_infoCol0 : m_infoCol1;
+            col->addRow(m_infoTitles.at(i), m_infoValues.at(i));
+        }
+        m_infoOuter->setStretch(0, 1);
+        m_infoOuter->setStretch(1, twoColumn ? 1 : 0);
+    }
+
+    m_infoBox->updateGeometry();
+    m_updatingInfoLayout = false;
 }
 
 void MainWindow::setupLogUi(QVBoxLayout *parentLayout)
 {
-    auto *box = new QGroupBox(tr("操作日志"), this);
+    m_logBox = new QGroupBox(tr("操作日志"), this);
+    auto *box = m_logBox;
     box->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     auto *layout = new QVBoxLayout(box);
     layout->setContentsMargins(12, 8, 12, 12);
@@ -416,7 +685,8 @@ void MainWindow::appendLog(const QString &message, bool isError)
 
 void MainWindow::setupConvertUi(QVBoxLayout *parentLayout)
 {
-    auto *box = new QGroupBox(tr("转换"), this);
+    m_convertBox = new QGroupBox(tr("转换"), this);
+    auto *box = m_convertBox;
     box->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
     auto *layout = new QVBoxLayout(box);
     layout->setContentsMargins(12, 12, 12, 12);
@@ -618,11 +888,16 @@ void MainWindow::resetMediaInfo()
 {
     m_thumbLabel->clearSource();
     m_durationLabel->setText(tr("未知"));
+    m_fileSizeLabel->setText(tr("未知"));
+    m_containerLabel->setText(tr("未知"));
     m_resolutionLabel->setText(tr("未知"));
+    m_pixelFormatLabel->setText(tr("未知"));
     m_videoCodecLabel->setText(tr("未知"));
     m_frameRateLabel->setText(tr("未知"));
     m_bitrateLabel->setText(tr("未知"));
     m_audioCodecLabel->setText(tr("未知"));
+    m_audioParamsLabel->setText(tr("未知"));
+    updateMediaInfoLayout();
 }
 
 void MainWindow::onOpenVideo()
@@ -1196,8 +1471,19 @@ void MainWindow::parseProbeJson(const QByteArray &jsonData)
         m_durationLabel->setText(tr("未知"));
     }
 
+    qint64 fileSize = QFileInfo(m_currentFile).size();
+    if (fileSize <= 0) {
+        bool sizeOk = false;
+        fileSize = jsonToInt64(format.value(QStringLiteral("size")), &sizeOk);
+        if (!sizeOk)
+            fileSize = -1;
+    }
+    m_fileSizeLabel->setText(formatFileSize(fileSize));
+    m_containerLabel->setText(formatContainer(format, m_currentFile));
+
     if (video.isEmpty()) {
         m_resolutionLabel->setText(tr("无"));
+        m_pixelFormatLabel->setText(tr("无"));
         m_videoCodecLabel->setText(tr("无"));
         m_frameRateLabel->setText(tr("无"));
     } else {
@@ -1208,6 +1494,7 @@ void MainWindow::parseProbeJson(const QByteArray &jsonData)
         else
             m_resolutionLabel->setText(tr("未知"));
 
+        m_pixelFormatLabel->setText(formatPixelFormat(video));
         m_videoCodecLabel->setText(formatCodec(video));
 
         QString fps = jsonToString(video.value(QStringLiteral("avg_frame_rate")));
@@ -1222,12 +1509,17 @@ void MainWindow::parseProbeJson(const QByteArray &jsonData)
         bitrate = jsonToInt64(video.value(QStringLiteral("bit_rate")), &bitrateOk);
     m_bitrateLabel->setText(bitrateOk ? formatBitrate(bitrate) : tr("未知"));
 
-    if (audio.isEmpty())
+    if (audio.isEmpty()) {
         m_audioCodecLabel->setText(tr("无"));
-    else
+        m_audioParamsLabel->setText(tr("无"));
+    } else {
         m_audioCodecLabel->setText(formatCodec(audio));
+        m_audioParamsLabel->setText(formatAudioParams(audio));
+    }
 
     m_probeOk = true;
+    updateMediaInfoLayout();
+    QTimer::singleShot(0, this, [this]() { updateMediaInfoLayout(); });
 
     const int seekSeconds = (m_durationSec >= 0.0 && m_durationSec < 1.0) ? 0 : 1;
     showStatus(tr("正在提取缩略图…"));
