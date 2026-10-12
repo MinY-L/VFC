@@ -23,8 +23,11 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPixmap>
+#include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScrollBar>
+#include <QTime>
 #include <QSettings>
 #include <QStyle>
 #include <QStyleOptionFrame>
@@ -346,17 +349,72 @@ void MainWindow::setupUi()
 
     root->setSizeConstraint(QLayout::SetNoConstraint);
     root->addLayout(top);
-    root->addLayout(body, 1);
+    root->addLayout(body, 0);
+    setupLogUi(root);
     setupConvertUi(root);
 
     statusBar()->showMessage(tr("请打开一个视频文件"));
+    appendLog(tr("程序已就绪，请打开视频文件"));
     connect(m_openButton, &QPushButton::clicked, this, &MainWindow::onOpenVideo);
     updateConvertButtons();
     updateOutputPreview();
     resize(820, sizeHint().height());
 }
 
-void MainWindow::setupConvertUi(QLayout *parentLayout)
+void MainWindow::setupLogUi(QVBoxLayout *parentLayout)
+{
+    auto *box = new QGroupBox(tr("操作日志"), this);
+    box->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    auto *layout = new QVBoxLayout(box);
+    layout->setContentsMargins(12, 8, 12, 12);
+    layout->setSpacing(8);
+
+    auto *top = new QHBoxLayout();
+    top->addStretch(1);
+    m_clearLogButton = new QPushButton(tr("清空"), this);
+    m_clearLogButton->setCursor(Qt::PointingHandCursor);
+    m_clearLogButton->setFlat(true);
+    top->addWidget(m_clearLogButton);
+
+    m_logEdit = new QPlainTextEdit(this);
+    m_logEdit->setReadOnly(true);
+    m_logEdit->setUndoRedoEnabled(false);
+    m_logEdit->setMaximumBlockCount(300);
+    m_logEdit->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    m_logEdit->setPlaceholderText(tr("操作记录将显示在这里"));
+    m_logEdit->setMinimumHeight(88);
+    m_logEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    layout->addLayout(top);
+    layout->addWidget(m_logEdit, 1);
+    parentLayout->addWidget(box, 1);
+
+    connect(m_clearLogButton, &QPushButton::clicked, this, &MainWindow::onClearLog);
+}
+
+void MainWindow::onClearLog()
+{
+    if (m_logEdit)
+        m_logEdit->clear();
+    appendLog(tr("日志已清空"));
+}
+
+void MainWindow::appendLog(const QString &message, bool isError)
+{
+    if (!m_logEdit || message.trimmed().isEmpty())
+        return;
+    const QString time = QTime::currentTime().toString(QStringLiteral("HH:mm:ss"));
+    const QString line = isError
+        ? QStringLiteral("[%1] 错误：%2").arg(time, message)
+        : QStringLiteral("[%1] %2").arg(time, message);
+    const bool stickToBottom = !m_logEdit->verticalScrollBar()
+        || m_logEdit->verticalScrollBar()->value() >= m_logEdit->verticalScrollBar()->maximum() - 4;
+    m_logEdit->appendPlainText(line);
+    if (stickToBottom)
+        m_logEdit->verticalScrollBar()->setValue(m_logEdit->verticalScrollBar()->maximum());
+}
+
+void MainWindow::setupConvertUi(QVBoxLayout *parentLayout)
 {
     auto *box = new QGroupBox(tr("转换"), this);
     box->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
@@ -599,6 +657,7 @@ void MainWindow::onBrowseOutputDir()
     if (dir.isEmpty())
         return;
     m_outputDirEdit->setText(QDir::toNativeSeparators(dir));
+    showStatus(tr("已选择输出目录：%1").arg(QDir::toNativeSeparators(dir)));
 }
 
 void MainWindow::setConvertOutputDir(const QString &dir)
@@ -687,6 +746,7 @@ void MainWindow::onOpenOutputFile()
 #else
     QDesktopServices::openUrl(QUrl::fromLocalFile(native));
 #endif
+    showStatus(tr("已定位成品：%1").arg(native));
 }
 
 void MainWindow::onCancelConvert()
@@ -1258,6 +1318,7 @@ void MainWindow::updateBusyState()
 void MainWindow::showStatus(const QString &message, bool isError)
 {
     statusBar()->showMessage(message, isError ? 8000 : 6000);
+    appendLog(message, isError);
 }
 
 void MainWindow::abandonProcess(QProcess *&process)

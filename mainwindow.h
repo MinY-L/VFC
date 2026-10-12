@@ -9,11 +9,12 @@
 
 class QComboBox;
 class QLabel;
-class QLayout;
 class QLineEdit;
+class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QTimer;
+class QVBoxLayout;
 class ThumbView;
 
 class MainWindow : public QMainWindow
@@ -48,11 +49,12 @@ private slots:
     void onStartConvert();
     void onCancelConvert();
     void onOpenOutputFile();
+    void onClearLog();
     void onSmoothProgressTick();
 
 private:
     void setupUi();
-    void setupConvertUi(QLayout *parentLayout);
+    void setupConvertUi(QVBoxLayout *parentLayout);
     void resetMediaInfo();
     void updateConvertButtons();
     void updateOutputPreview();
@@ -79,6 +81,8 @@ private:
     void parseProbeJson(const QByteArray &jsonData);
     void updateBusyState();
     void showStatus(const QString &message, bool isError = false);
+    void appendLog(const QString &message, bool isError = false);
+    void setupLogUi(QVBoxLayout *parentLayout);
     void abandonProcess(QProcess *&process);
     void stopProcessForDestroy(QProcess *process);
     void cleanupThumbFile(bool delayed = true);
@@ -93,6 +97,8 @@ private:
     QLabel *m_frameRateLabel = nullptr;
     QLabel *m_bitrateLabel = nullptr;
     QLabel *m_audioCodecLabel = nullptr;
+    QPlainTextEdit *m_logEdit = nullptr;
+    QPushButton *m_clearLogButton = nullptr;
 
     QComboBox *m_formatCombo = nullptr;
     QComboBox *m_qualityCombo = nullptr;
