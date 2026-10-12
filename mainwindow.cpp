@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QJsonArray>
@@ -19,10 +20,14 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QUrl>
+#include <QPainter>
+#include <QPaintEvent>
 #include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSettings>
+#include <QStyle>
+#include <QStyleOptionFrame>
 #include <QSizePolicy>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -33,6 +38,10 @@
 #include <cmath>
 
 namespace {
+
+constexpr int kThumbMinW = 320;
+constexpr int kThumbMaxW = 640;
+constexpr int kThumbExtractW = 1280;
 
 QString jsonToString(const QJsonValue &value)
 {
@@ -179,6 +188,76 @@ QString lastErrorSnippet(const QByteArray &raw)
 
 } // namespace
 
+class ThumbView final : public QFrame
+{
+public:
+    explicit ThumbView(QWidget *parent = nullptr)
+        : QFrame(parent)
+    {
+        setFrameStyle(QFrame::StyledPanel | QFrame::Sunken);
+        QSizePolicy policy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        policy.setHeightForWidth(true);
+        setSizePolicy(policy);
+        setMinimumSize(kThumbMinW, kThumbMinW * 9 / 16);
+        setMaximumSize(kThumbMaxW, kThumbMaxW * 9 / 16);
+        setAttribute(Qt::WA_OpaquePaintEvent, true);
+    }
+
+    void setSourcePixmap(const QPixmap &pixmap)
+    {
+        m_source = pixmap;
+        update();
+    }
+
+    void clearSource()
+    {
+        m_source = QPixmap();
+        update();
+    }
+
+    bool hasHeightForWidth() const override { return true; }
+
+    int heightForWidth(int w) const override
+    {
+        const int capped = qBound(kThumbMinW, w, kThumbMaxW);
+        return capped * 9 / 16;
+    }
+
+    QSize sizeHint() const override
+    {
+        return QSize(kThumbMinW, kThumbMinW * 9 / 16);
+    }
+
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        QStyleOptionFrame opt;
+        initStyleOption(&opt);
+        style()->drawPrimitive(QStyle::PE_Frame, &opt, &painter, this);
+
+        const QRect inner = contentsRect();
+        painter.fillRect(inner, palette().color(QPalette::Base));
+        if (m_source.isNull()) {
+            painter.setPen(palette().color(QPalette::PlaceholderText));
+            painter.drawText(inner, Qt::AlignCenter, QObject::tr("缩略图"));
+            return;
+        }
+
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        QSize img = m_source.size();
+        img.scale(inner.size(), Qt::KeepAspectRatio);
+        QRect dest(QPoint(), img);
+        dest.moveCenter(inner.center());
+        painter.drawPixmap(dest, m_source);
+    }
+
+private:
+    QPixmap m_source;
+};
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
@@ -225,13 +304,7 @@ void MainWindow::setupUi()
     top->addWidget(m_openButton);
     top->addWidget(m_fileNameLabel, 1);
 
-    m_thumbLabel = new QLabel(this);
-    m_thumbLabel->setFixedSize(320, 180);
-    m_thumbLabel->setAlignment(Qt::AlignCenter);
-    m_thumbLabel->setFrameStyle(QFrame::StyledPanel | QFrame::Sunken);
-    m_thumbLabel->setText(tr("缩略图"));
-    m_thumbLabel->setScaledContents(false); // 不让 QLabel 再拉图像，缩放在 setPixmap 前做完
-    m_thumbLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_thumbLabel = new ThumbView(this);
 
     auto *infoBox = new QGroupBox(tr("媒体信息"), this);
     infoBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
@@ -264,13 +337,16 @@ void MainWindow::setupUi()
     form->addRow(tr("码率："), m_bitrateLabel);
     form->addRow(tr("音频编码："), m_audioCodecLabel);
 
-    auto *body = new QHBoxLayout();
+    auto *body = new QGridLayout();
     body->setSpacing(12);
-    body->addWidget(m_thumbLabel, 0, Qt::AlignTop);
-    body->addWidget(infoBox, 1, Qt::AlignTop);
+    body->addWidget(m_thumbLabel, 0, 0, Qt::AlignTop);
+    body->addWidget(infoBox, 0, 1, Qt::AlignTop);
+    body->setColumnStretch(0, 1);
+    body->setColumnStretch(1, 1);
 
+    root->setSizeConstraint(QLayout::SetNoConstraint);
     root->addLayout(top);
-    root->addLayout(body);
+    root->addLayout(body, 1);
     setupConvertUi(root);
 
     statusBar()->showMessage(tr("请打开一个视频文件"));
@@ -306,12 +382,13 @@ void MainWindow::setupConvertUi(QLayout *parentLayout)
     m_qualityCombo->setMinimumWidth(100);
     m_qualityCombo->setToolTip(tr("高 = CRF 18，中 = CRF 23，低 = CRF 28"));
 
+    m_formatCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_qualityCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     optionsRow->addWidget(formatLabel);
-    optionsRow->addWidget(m_formatCombo);
+    optionsRow->addWidget(m_formatCombo, 1);
     optionsRow->addSpacing(16);
     optionsRow->addWidget(qualityLabel);
-    optionsRow->addWidget(m_qualityCombo);
-    optionsRow->addStretch(1);
+    optionsRow->addWidget(m_qualityCombo, 1);
 
     auto *dirRow = new QHBoxLayout();
     auto *dirLabel = new QLabel(tr("输出目录："), this);
@@ -342,10 +419,9 @@ void MainWindow::setupConvertUi(QLayout *parentLayout)
     m_openOutputButton = new QPushButton(tr("打开成品"), this);
     m_openOutputButton->setMinimumHeight(32);
     m_openOutputButton->setCursor(Qt::PointingHandCursor);
-    actionRow->addWidget(m_startConvertButton);
-    actionRow->addWidget(m_cancelConvertButton);
-    actionRow->addWidget(m_openOutputButton);
-    actionRow->addStretch(1);
+    actionRow->addWidget(m_startConvertButton, 1);
+    actionRow->addWidget(m_cancelConvertButton, 1);
+    actionRow->addWidget(m_openOutputButton, 1);
 
     auto *progressRow = new QHBoxLayout();
     m_progressBar = new QProgressBar(this);
@@ -482,8 +558,7 @@ void MainWindow::updateOutputPreview()
 
 void MainWindow::resetMediaInfo()
 {
-    m_thumbLabel->setPixmap(QPixmap());
-    m_thumbLabel->setText(tr("缩略图"));
+    m_thumbLabel->clearSource();
     m_durationLabel->setText(tr("未知"));
     m_resolutionLabel->setText(tr("未知"));
     m_videoCodecLabel->setText(tr("未知"));
@@ -1136,7 +1211,7 @@ void MainWindow::startThumbnail(const QString &filePath, int seekSeconds)
     args << QStringLiteral("-ss") << QString::number(seekSeconds)
          << QStringLiteral("-i") << filePath
          << QStringLiteral("-frames:v") << QStringLiteral("1")
-         << QStringLiteral("-vf") << QStringLiteral("scale=640:-1")
+         << QStringLiteral("-vf") << QStringLiteral("scale=%1:-2").arg(kThumbExtractW)
          << QStringLiteral("-y")
          << m_thumbPath;
 
@@ -1170,7 +1245,7 @@ void MainWindow::onThumbFinished(QProcess *process, int exitCode, QProcess::Exit
         return;
     }
 
-    applyThumbnailPixmap(pixmap);
+    m_thumbLabel->setSourcePixmap(pixmap);
     m_thumbOk = true;
     showStatus(tr("已加载：%1").arg(QFileInfo(m_currentFile).fileName()));
 }
@@ -1219,22 +1294,6 @@ void MainWindow::cleanupThumbFile(bool delayed)
     }
     // 快速连开时旧 ffmpeg 可能还占着文件，稍后再删，避免阻塞 UI
     QTimer::singleShot(2000, [leftover]() { QFile::remove(leftover); });
-}
-
-void MainWindow::applyThumbnailPixmap(const QPixmap &pixmap)
-{
-    const QSize box = m_thumbLabel->contentsRect().size();
-    if (box.isEmpty() || pixmap.isNull()) {
-        m_thumbLabel->setPixmap(QPixmap());
-        m_thumbLabel->setText(tr("缩略图"));
-        return;
-    }
-
-    const qreal dpr = m_thumbLabel->devicePixelRatioF();
-    QPixmap scaled = pixmap.scaled(box * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    scaled.setDevicePixelRatio(dpr);
-    m_thumbLabel->setText(QString());
-    m_thumbLabel->setPixmap(scaled);
 }
 
 QString MainWindow::resolveTool(const QString &name) const

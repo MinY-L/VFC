@@ -11,10 +11,10 @@ class QComboBox;
 class QLabel;
 class QLayout;
 class QLineEdit;
-class QPixmap;
 class QProgressBar;
 class QPushButton;
 class QTimer;
+class ThumbView;
 
 class MainWindow : public QMainWindow
 {
@@ -82,12 +82,11 @@ private:
     void abandonProcess(QProcess *&process);
     void stopProcessForDestroy(QProcess *process);
     void cleanupThumbFile(bool delayed = true);
-    void applyThumbnailPixmap(const QPixmap &pixmap);
     QString resolveTool(const QString &name) const;
 
     QPushButton *m_openButton = nullptr;
     QLabel *m_fileNameLabel = nullptr;
-    QLabel *m_thumbLabel = nullptr;
+    ThumbView *m_thumbLabel = nullptr;
     QLabel *m_durationLabel = nullptr;
     QLabel *m_resolutionLabel = nullptr;
     QLabel *m_videoCodecLabel = nullptr;
