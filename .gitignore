@@ -1,4 +1,5 @@
 build/
+release/
 CMakeLists.txt.user*
 .qtc_clangd/
 .qtcreator/
